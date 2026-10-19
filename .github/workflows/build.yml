@@ -1,0 +1,95 @@
+name: Build PulseRide
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Finds the Flutter project wherever it was uploaded, and prints the repo's
+      # files if something is missing, so we can see exactly what GitHub received.
+      - name: Locate Flutter project
+        run: |
+          FILE=$(find . -name pubspec.yaml -not -path './.git/*' | head -1)
+          if [ -z "$FILE" ]; then
+            echo "::error::No pubspec.yaml found in the repository. Files present:"
+            find . -not -path './.git/*' -type f | head -60
+            exit 1
+          fi
+          DIR=$(dirname "$FILE")
+          echo "Flutter project found in: $DIR"
+          if [ ! -d "$DIR/lib" ]; then
+            echo "::error::pubspec.yaml found but there is no lib folder next to it. Files present:"
+            find . -not -path './.git/*' -type f | head -60
+            exit 1
+          fi
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate platform folders
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          cp -r lib /tmp/lib_backup
+          cp pubspec.yaml /tmp/pubspec_backup.yaml
+          flutter create --platforms=android,web --project-name pulseride --org com.example .
+          rm -rf lib && cp -r /tmp/lib_backup lib
+          cp /tmp/pubspec_backup.yaml pubspec.yaml
+          rm -rf test
+
+      - name: Add Android permissions
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+
+      - name: flutter pub get
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
+
+      # Demo mode = built-in sample people around London, no Supabase needed.
+      - name: Build Android APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --release --dart-define=PULSERIDE_DEMO=true
+
+      - name: Build web
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build web --release --base-href "/${{ github.event.repository.name }}/" --dart-define=PULSERIDE_DEMO=true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulseride-apk
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PROJECT_DIR }}/build/web
+
+  # Optional live web demo. Needs Settings > Pages > Source = "GitHub Actions".
+  deploy-web:
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
